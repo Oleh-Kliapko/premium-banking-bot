@@ -1,0 +1,11 @@
+# Середовище
+.env
+node_modules/
+dist/
+
+# База знань (великий файл, генерується локально)
+data/index.json
+
+# Системне
+.DS_Store
+.vscode/

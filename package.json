@@ -1,0 +1,26 @@
+{
+  "name": "premium-banking-bot",
+  "version": "1.0.0",
+  "description": "Закритий Telegram-бот AI-консультант по продуктах банку",
+  "main": "dist/src/bot.js",
+  "scripts": {
+    "dev": "tsx watch src/bot.ts",
+    "build": "tsc",
+    "start": "node dist/src/bot.js",
+    "ingest": "tsx scripts/ingest.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.106.0",
+    "dotenv": "^17.4.2",
+    "grammy": "^1.44.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}
