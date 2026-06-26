@@ -41,10 +41,12 @@ export interface ClaudeResponse {
 	outputTokens: number
 }
 
-// Витягуємо числовий ID статті для дедуплікації (різні формати URL — один артикул)
+// Витягуємо числовий ID статті для дедуплікації джерел.
+// URL: /uk_UA/{секція}/{стаття} — беремо ОСТАННЄ 8+-значне число (ID статті),
+// інакше різні статті однієї секції склеюються в одне джерело.
 function extractArticleId(url: string): string {
-	const match = url.match(/\/(\d{8,})/)
-	return match ? match[1] : url
+	const nums = url.match(/\d{8,}/g)
+	return nums ? nums[nums.length - 1] : url
 }
 
 // Чи відповідь — це "не знайшов" / м'яка відмова (тоді джерела показувати немає сенсу)
@@ -64,21 +66,16 @@ function isNotFoundAnswer(text: string): boolean {
 	return markers.some(m => lower.includes(m))
 }
 
-function buildSystemPrompt(ragContext: string): string {
-	const hasContext = ragContext.trim().length > 0
-
+function buildSystemPrompt(hasContext: boolean): string {
 	if (hasContext) {
-		return `Ти — AI-консультант з продуктів банку. Відповідай на основі КОНТЕКСТУ з бази знань банку.
+		return `Ти — AI-консультант з продуктів банку. Відповідай на основі ДОДАНИХ ДОКУМЕНТІВ з бази знань банку.
 
 Правила:
-1. Відповідай тільки з інформації в КОНТЕКСТІ. Не вигадуй.
-2. Якщо інформації немає в КОНТЕКСТІ — скажи: «Не знайшов підтвердженої інформації. Перевірте в офіційному застосунку банку.»
+1. Відповідай тільки з інформації в доданих документах. Не вигадуй.
+2. Якщо інформації немає в документах — скажи: «Не знайшов підтвердженої інформації. Перевірте в офіційному застосунку банку.»
 3. ВАЖЛИВО: загальна інформація Visa/Mastercard ≠ гарантія для твоєї картки. Додавай: «перевірте умови вашої картки в застосунку».
-4. Не називай цифри/ліміти, яких немає в КОНТЕКСТІ.
-5. Відповідай українською, коротко.
-
-КОНТЕКСТ:
-${ragContext}`
+4. Не називай цифри/ліміти, яких немає в документах.
+5. Відповідай українською, коротко. Спирайся саме на ті документи, що містять відповідь — решту ігноруй.`
 	}
 
 	return `Ти — AI-консультант з продуктів банку. Локальна база не містить відповіді — скористайся веб-пошуком по офіційних доменах.
@@ -101,18 +98,31 @@ export async function askClaude(
 	const baseQuery = prevUserQuestion
 		? `${prevUserQuestion} ${userQuestion}`
 		: userQuestion
-	const rewritten = await rewriteQuery(userQuestion)
-	if (rewritten) console.log(`[Rewrite] "${userQuestion}" → "${rewritten}"`)
+	// Переписуємо ПОВНИЙ контекстний запит (попереднє + поточне), а не голий
+	// фоллоу-ап — інакше уточнення на кшталт «я мав на увазі з кредитного ліміту»
+	// втрачає тему («ОВДП») і тягне нерелевантні статті.
+	const rewritten = await rewriteQuery(baseQuery)
+	if (rewritten) console.log(`[Rewrite] "${baseQuery}" → "${rewritten}"`)
 
 	const ragResults = await retrieveMulti([baseQuery, rewritten])
 	const hasRagResults = ragResults.length > 0
 
-	const ragContext = ragResults
-		.map(
-			r =>
-				`[Джерело: ${r.chunk.title} — ${r.chunk.sourceUrl}]\n${r.chunk.text}`,
-		)
-		.join("\n\n---\n\n")
+	// Кожен знайдений чанк передаємо як окремий document-блок з увімкненими
+	// нативними цитатами. Так Claude сам позначає, який документ реально
+	// використав, і в джерела потрапляють ЛИШЕ процитовані статті (а не весь
+	// топ-K з його випадковим вокабулярним шумом).
+	const docBlocks: Anthropic.Messages.ContentBlockParam[] = ragResults.map(
+		r => ({
+			type: "document",
+			source: {
+				type: "text",
+				media_type: "text/plain",
+				data: r.chunk.text,
+			},
+			title: r.chunk.title,
+			citations: { enabled: true },
+		}),
+	)
 
 	const topScore = ragResults[0]?.score ?? 0
 	console.log(
@@ -132,29 +142,26 @@ export async function askClaude(
 		  ]
 		: []
 
+	// Поточний хід користувача: документи бази + саме питання
+	const userContent: Anthropic.Messages.ContentBlockParam[] = hasRagResults
+		? [...docBlocks, { type: "text", text: userQuestion }]
+		: [{ type: "text", text: userQuestion }]
+
 	const response = await client.messages.create({
 		model: MODEL,
 		max_tokens: 1024,
-		system: buildSystemPrompt(ragContext),
+		system: buildSystemPrompt(hasRagResults),
 		...(tools.length > 0 ? { tools } : {}),
 		messages: [
 			...history.map(t => ({ role: t.role, content: t.content })),
-			{ role: "user", content: userQuestion },
+			{ role: "user", content: userContent },
 		],
 	})
 
 	// 3. Парсимо відповідь
-	// Збираємо RAG джерела — дедуплікуємо за article ID
 	const seenIds = new Set<string>()
 	const sources: Source[] = []
-
-	for (const r of ragResults) {
-		const id = extractArticleId(r.chunk.sourceUrl)
-		if (!seenIds.has(id) && r.chunk.sourceUrl) {
-			seenIds.add(id)
-			sources.push({ url: r.chunk.sourceUrl, title: r.chunk.title })
-		}
-	}
+	const citedDocs = new Set<number>() // індекси процитованих document-блоків
 
 	let text = ""
 	let usedWebSearch = false
@@ -162,6 +169,15 @@ export async function askClaude(
 	for (const block of response.content) {
 		if (block.type === "text") {
 			text += block.text
+			// Збираємо індекси документів, які Claude реально процитував
+			const citations = (block as any).citations
+			if (Array.isArray(citations)) {
+				for (const c of citations) {
+					if (typeof c.document_index === "number") {
+						citedDocs.add(c.document_index)
+					}
+				}
+			}
 		} else if (block.type === "web_search_tool_result") {
 			usedWebSearch = true
 			const content = (block as any).content
@@ -176,6 +192,21 @@ export async function askClaude(
 					}
 				}
 			}
+		}
+	}
+
+	// RAG-джерела: беремо ЛИШЕ ті статті, що Claude процитував (дедуп за article ID).
+	// Якщо цитат не повернулось, але відповідь змістовна — лишаємо топ-1 чанк
+	// як fallback (щоб під відповіддю завжди було хоч одне джерело).
+	const citedIndices =
+		citedDocs.size > 0 ? [...citedDocs].sort((a, b) => a - b) : hasRagResults ? [0] : []
+	for (const i of citedIndices) {
+		const chunk = ragResults[i]?.chunk
+		if (!chunk?.sourceUrl) continue
+		const id = extractArticleId(chunk.sourceUrl)
+		if (!seenIds.has(id)) {
+			seenIds.add(id)
+			sources.push({ url: chunk.sourceUrl, title: chunk.title })
 		}
 	}
 
