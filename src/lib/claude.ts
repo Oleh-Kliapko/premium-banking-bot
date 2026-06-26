@@ -47,15 +47,21 @@ function extractArticleId(url: string): string {
 	return match ? match[1] : url
 }
 
-// Чи відповідь — це "не знайшов" (тоді джерела показувати немає сенсу)
+// Чи відповідь — це "не знайшов" / м'яка відмова (тоді джерела показувати немає сенсу)
 function isNotFoundAnswer(text: string): boolean {
 	const lower = text.toLowerCase()
-	return (
-		lower.includes("не знайшов підтвердженої") ||
-		lower.includes("не маю підтвердженої") ||
-		lower.includes("не маю інформації") ||
-		lower.includes("немає підтвердженої")
-	)
+	const markers = [
+		"не знайшов підтвердженої",
+		"не маю підтвердженої",
+		"не маю інформації",
+		"немає підтвердженої",
+		"не можу надати", // "не можу надати точну відповідь / інформацію"
+		"не можу відповісти",
+		"контекст не містить",
+		"не містить конкретної інформації",
+		"немає інформації",
+	]
+	return markers.some(m => lower.includes(m))
 }
 
 function buildSystemPrompt(ragContext: string): string {
