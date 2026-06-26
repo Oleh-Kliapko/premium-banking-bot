@@ -1,15 +1,19 @@
 import { FeatureExtractionPipeline, pipeline } from "@huggingface/transformers"
 
 const MODEL = "intfloat/multilingual-e5-small"
-let embedder: FeatureExtractionPipeline | null = null
+// Кешуємо ПРОМІС, а не результат — щоб паралельні виклики (retrieveMulti)
+// не запускали завантаження моделі двічі (race condition)
+let embedderPromise: Promise<FeatureExtractionPipeline> | null = null
 
-async function getEmbedder(): Promise<FeatureExtractionPipeline> {
-	if (!embedder) {
+function getEmbedder(): Promise<FeatureExtractionPipeline> {
+	if (!embedderPromise) {
 		console.log("Завантаження моделі ембедингів...")
-		embedder = await pipeline("feature-extraction", MODEL)
-		console.log("Модель готова.")
+		embedderPromise = pipeline("feature-extraction", MODEL).then(p => {
+			console.log("Модель готова.")
+			return p
+		})
 	}
-	return embedder
+	return embedderPromise
 }
 
 export async function embed(text: string): Promise<number[]> {
