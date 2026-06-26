@@ -1,11 +1,19 @@
 import "dotenv/config"
-import { Bot } from "grammy"
+import { Bot, InlineKeyboard, type Context } from "grammy"
 import cron from "node-cron"
 import { spawn } from "child_process"
 import { authMiddleware } from "./middleware/auth"
 import { rateLimitMiddleware } from "./middleware/rateLimit"
 import { askClaude } from "./lib/claude"
 import { resetIndex } from "./lib/retriever"
+import {
+  getHistory,
+  addTurn,
+  clearHistory,
+  lastUserQuestion,
+  setPending,
+  takePending,
+} from "./lib/conversation"
 
 function escapeHtml(text: string): string {
   return text
@@ -35,19 +43,25 @@ bot.command("myid", ctx =>
   ctx.reply(`Ваш Telegram ID: \`${ctx.from?.id}\``, { parse_mode: "Markdown" }),
 )
 
-bot.command("start", ctx =>
-  ctx.reply(
+bot.command("start", ctx => {
+  if (ctx.from) clearHistory(ctx.from.id)
+  return ctx.reply(
     "👋 Вітаю! Я AI-консультант з продуктів банку.\n\n" +
       "Можу відповісти на питання про тарифи, картки, лаунжі та переваги преміум-пакетів.\n\n" +
       "⚠️ *Дисклеймер:* Демонстраційний прототип. Не є офіційним сервісом банку. " +
       "Перевіряйте умови в офіційному застосунку.",
     { parse_mode: "Markdown" },
-  ),
-)
+  )
+})
 
 // Весь інший трафік — тільки для дозволених користувачів
 bot.use(authMiddleware)
 bot.use(rateLimitMiddleware)
+
+bot.command("reset", ctx => {
+  if (ctx.from) clearHistory(ctx.from.id)
+  return ctx.reply("🔄 Контекст розмови очищено. Можете почати нову тему.")
+})
 
 bot.command("help", ctx =>
   ctx.reply(
@@ -64,18 +78,20 @@ bot.command("help", ctx =>
   ),
 )
 
-bot.on("message:text", async ctx => {
-  const question = ctx.message.text
-  console.log(`[Bot] питання від ${ctx.from?.id}: "${question}"`)
-
-  // Одразу надсилаємо заглушку і запускаємо індикатор
+// Обробка питання: RAG + Claude → відповідь у Telegram
+async function handleQuestion(ctx: Context, userId: number, question: string, useContext: boolean) {
   const waitMsg = await ctx.reply("⏳ Ваше питання в роботі, очікуйте...")
   const typingInterval = setInterval(() => {
     ctx.replyWithChatAction("typing").catch(() => {})
   }, 4000)
 
   try {
-    const result = await askClaude(question)
+    const history = useContext ? getHistory(userId) : []
+    const prevQuestion = useContext ? lastUserQuestion(userId) : ""
+    const result = await askClaude(question, history, prevQuestion)
+
+    addTurn(userId, "user", question)
+    addTurn(userId, "assistant", result.text)
     console.log(`[Bot] відповідь (${result.text.length} chars), джерел: ${result.sources.length}`)
 
     let reply = escapeHtml(result.text)
@@ -88,8 +104,7 @@ bot.on("message:text", async ctx => {
     }
 
     clearInterval(typingInterval)
-    console.log("[Bot] надсилаємо відповідь...")
-    await ctx.api.editMessageText(ctx.chat.id, waitMsg.message_id, reply, {
+    await ctx.api.editMessageText(ctx.chat!.id, waitMsg.message_id, reply, {
       parse_mode: "HTML",
     })
     console.log("[Bot] відповідь надіслана ✓")
@@ -98,7 +113,7 @@ bot.on("message:text", async ctx => {
     console.error("[Bot] помилка:", err)
     try {
       await ctx.api.editMessageText(
-        ctx.chat.id,
+        ctx.chat!.id,
         waitMsg.message_id,
         "⚠️ Виникла помилка. Спробуйте пізніше.",
       )
@@ -106,6 +121,46 @@ bot.on("message:text", async ctx => {
       console.error("[Bot] не вдалось оновити повідомлення:", e2)
     }
   }
+}
+
+bot.on("message:text", async ctx => {
+  const question = ctx.message.text
+  const userId = ctx.from!.id
+  console.log(`[Bot] питання від ${userId}: "${question}"`)
+
+  // Перше питання в розмові — обробляємо одразу
+  if (getHistory(userId).length === 0) {
+    await handleQuestion(ctx, userId, question, false)
+    return
+  }
+
+  // Є контекст → питаємо нове це питання чи продовження
+  setPending(userId, question)
+  const keyboard = new InlineKeyboard()
+    .text("🆕 Нове питання", "ctx_new")
+    .text("↪️ Продовження теми", "ctx_continue")
+  await ctx.reply("Це нове питання чи продовження попередньої теми?", {
+    reply_markup: keyboard,
+  })
+})
+
+bot.callbackQuery("ctx_new", async ctx => {
+  await ctx.answerCallbackQuery()
+  const userId = ctx.from.id
+  const question = takePending(userId)
+  await ctx.editMessageText("🆕 Нова тема").catch(() => {})
+  if (!question) return
+  clearHistory(userId)
+  await handleQuestion(ctx, userId, question, false)
+})
+
+bot.callbackQuery("ctx_continue", async ctx => {
+  await ctx.answerCallbackQuery()
+  const userId = ctx.from.id
+  const question = takePending(userId)
+  await ctx.editMessageText("↪️ Продовжуємо тему").catch(() => {})
+  if (!question) return
+  await handleQuestion(ctx, userId, question, true)
 })
 
 bot.catch(err => {

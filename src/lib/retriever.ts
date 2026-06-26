@@ -42,6 +42,12 @@ function cosineSimilarity(a: number[], b: number[]): number {
 	return dot / (Math.sqrt(normA) * Math.sqrt(normB))
 }
 
+// ID статті з URL — щоб дедуплікувати чанки однієї статті
+function articleId(url: string): string {
+	const match = url.match(/\/(\d{8,})/)
+	return match ? match[1] : url
+}
+
 export async function retrieve(query: string): Promise<RetrievedChunk[]> {
 	const chunks = loadIndex()
 	if (chunks.length === 0) return []
@@ -51,12 +57,25 @@ export async function retrieve(query: string): Promise<RetrievedChunk[]> {
 
 	const queryEmbedding = await embed(query)
 
-	return chunks
+	const scored = chunks
 		.map(chunk => ({
 			chunk,
 			score: cosineSimilarity(queryEmbedding, chunk.embedding),
 		}))
 		.filter(r => r.score >= threshold)
 		.sort((a, b) => b.score - a.score)
-		.slice(0, topK)
+
+	// Диверсифікація: максимум 2 чанки на статтю.
+	// Це дає і РІЗНІ статті (покриття), і глибину відповіді в межах статті.
+	const perArticle = new Map<string, number>()
+	const result: RetrievedChunk[] = []
+	for (const r of scored) {
+		const id = articleId(r.chunk.sourceUrl)
+		const count = perArticle.get(id) ?? 0
+		if (count >= 2) continue
+		perArticle.set(id, count + 1)
+		result.push(r)
+		if (result.length >= topK) break
+	}
+	return result
 }

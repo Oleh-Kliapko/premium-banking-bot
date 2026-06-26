@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk"
 import { ALLOWED_DOMAINS } from "../config/domains"
 import { retrieve } from "./retriever"
+import type { Turn } from "./conversation"
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-4-6"
@@ -22,6 +23,17 @@ export interface ClaudeResponse {
 function extractArticleId(url: string): string {
 	const match = url.match(/\/(\d{8,})/)
 	return match ? match[1] : url
+}
+
+// Чи відповідь — це "не знайшов" (тоді джерела показувати немає сенсу)
+function isNotFoundAnswer(text: string): boolean {
+	const lower = text.toLowerCase()
+	return (
+		lower.includes("не знайшов підтвердженої") ||
+		lower.includes("не маю підтвердженої") ||
+		lower.includes("не маю інформації") ||
+		lower.includes("немає підтвердженої")
+	)
 }
 
 function buildSystemPrompt(ragContext: string): string {
@@ -50,9 +62,18 @@ ${ragContext}`
 4. Відповідай українською, коротко.`
 }
 
-export async function askClaude(userQuestion: string): Promise<ClaudeResponse> {
-	// 1. Шукаємо в локальній базі
-	const ragResults = await retrieve(userQuestion)
+export async function askClaude(
+	userQuestion: string,
+	history: Turn[] = [],
+	prevUserQuestion = "",
+): Promise<ClaudeResponse> {
+	// 1. Шукаємо в локальній базі.
+	// Для уточнюючих питань збагачуємо запит попереднім питанням —
+	// інакше короткий фоллоу-ап ("а чому не додав про X?") не знаходить контекст.
+	const retrievalQuery = prevUserQuestion
+		? `${prevUserQuestion} ${userQuestion}`
+		: userQuestion
+	const ragResults = await retrieve(retrievalQuery)
 	const hasRagResults = ragResults.length > 0
 
 	const ragContext = ragResults
@@ -85,7 +106,10 @@ export async function askClaude(userQuestion: string): Promise<ClaudeResponse> {
 		max_tokens: 1024,
 		system: buildSystemPrompt(ragContext),
 		...(tools.length > 0 ? { tools } : {}),
-		messages: [{ role: "user", content: userQuestion }],
+		messages: [
+			...history.map(t => ({ role: t.role, content: t.content })),
+			{ role: "user", content: userQuestion },
+		],
 	})
 
 	// 3. Парсимо відповідь
@@ -124,17 +148,22 @@ export async function askClaude(userQuestion: string): Promise<ClaudeResponse> {
 		}
 	}
 
+	const finalText =
+		text.trim() ||
+		"Не вдалося знайти відповідь. Спробуйте переформулювати або зверніться до застосунку банку."
+
+	// Якщо бот не знайшов відповіді — не показуємо нерелевантні джерела
+	const finalSources = isNotFoundAnswer(finalText) ? [] : sources
+
 	const usage = response.usage as any
 	const webReqs = usage?.server_tool_use?.web_search_requests ?? 0
 	console.log(
-		`[Claude] in=${usage.input_tokens} out=${usage.output_tokens} | rag=${ragResults.length} web=${webReqs}`,
+		`[Claude] in=${usage.input_tokens} out=${usage.output_tokens} | rag=${ragResults.length} web=${webReqs} | sources=${finalSources.length}`,
 	)
 
 	return {
-		text:
-			text.trim() ||
-			"Не вдалося знайти відповідь. Спробуйте переформулювати або зверніться до застосунку банку.",
-		sources,
+		text: finalText,
+		sources: finalSources,
 		usedWebSearch,
 		inputTokens: usage.input_tokens,
 		outputTokens: usage.output_tokens,

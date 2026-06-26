@@ -38,6 +38,18 @@ function parseMeta(content: string): { url: string; title: string; body: string 
   }
 }
 
+// Прибираємо Zendesk boilerplate, щоб чанки містили лише корисний текст
+function cleanBody(text: string): string {
+  return text
+    .replace(/Contact Us\s*/gi, "")
+    .replace(/Автор:\s*.+?Кількість вподобайок:\s*\d+\s*/gs, "")
+    .replace(/У цій статті:\s*/gi, "")
+    .replace(/Чи була ця стаття корисною\?\s*Так\s*Ні\s*/gi, "")
+    .replace(/Give feedback about this article/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
 async function main() {
   if (!existsSync(RAW_DIR)) {
     console.log("❌ Папка data/raw не існує. Спочатку запусти: npm run scrape")
@@ -58,7 +70,7 @@ async function main() {
     process.stdout.write(`\r[${f + 1}/${files.length}] ${file}`)
     const content = readFileSync(join(RAW_DIR, file), "utf-8")
     const { url, title, body } = parseMeta(content)
-    const parts = splitIntoChunks(body.trim())
+    const parts = splitIntoChunks(cleanBody(body))
 
     for (let i = 0; i < parts.length; i++) {
       const text = parts[i].trim()
