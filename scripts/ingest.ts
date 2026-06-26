@@ -12,6 +12,7 @@ interface Chunk {
 }
 
 const RAW_DIR = join(process.cwd(), "data", "raw")
+const CURATED_DIR = join(process.cwd(), "data", "curated")
 const INDEX_PATH = join(process.cwd(), "data", "index.json")
 const CHUNK_SIZE = 600
 const OVERLAP = 100
@@ -56,19 +57,29 @@ async function main() {
     process.exit(1)
   }
 
-  const files = readdirSync(RAW_DIR).filter(f => f.endsWith(".md"))
+  // Збираємо файли з raw/ (скраплені) та curated/ (ручні документи)
+  const rawFiles = readdirSync(RAW_DIR)
+    .filter(f => f.endsWith(".md"))
+    .map(f => ({ dir: RAW_DIR, file: f }))
+  const curatedFiles = existsSync(CURATED_DIR)
+    ? readdirSync(CURATED_DIR)
+        .filter(f => f.endsWith(".md"))
+        .map(f => ({ dir: CURATED_DIR, file: f }))
+    : []
+  const files = [...curatedFiles, ...rawFiles]
+
   if (files.length === 0) {
     console.log("❌ Немає файлів у data/raw/. Спочатку запусти: npm run scrape")
     process.exit(1)
   }
 
-  console.log(`📂 Файлів для індексації: ${files.length}`)
+  console.log(`📂 Файлів для індексації: ${files.length} (curated: ${curatedFiles.length}, raw: ${rawFiles.length})`)
   const allChunks: Chunk[] = []
 
   for (let f = 0; f < files.length; f++) {
-    const file = files[f]
+    const { dir, file } = files[f]
     process.stdout.write(`\r[${f + 1}/${files.length}] ${file}`)
-    const content = readFileSync(join(RAW_DIR, file), "utf-8")
+    const content = readFileSync(join(dir, file), "utf-8")
     const { url, title, body } = parseMeta(content)
     const parts = splitIntoChunks(cleanBody(body))
 

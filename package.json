@@ -8,7 +8,8 @@
     "build": "tsc",
     "start": "node dist/src/bot.js",
     "scrape": "tsx scripts/scrape.ts",
-    "ingest": "tsx scripts/ingest.ts"
+    "ingest": "tsx scripts/ingest.ts",
+    "ingest:curated": "tsx scripts/ingest-curated.ts"
   },
   "keywords": [],
   "author": "",
