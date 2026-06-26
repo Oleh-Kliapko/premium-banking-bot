@@ -1,10 +1,32 @@
 import Anthropic from "@anthropic-ai/sdk"
 import { ALLOWED_DOMAINS } from "../config/domains"
-import { retrieve } from "./retriever"
+import { retrieveMulti } from "./retriever"
 import type { Turn } from "./conversation"
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-4-6"
+const REWRITE_MODEL = "claude-haiku-4-5" // дешева модель для переписування запиту
+
+// Переписуємо природне питання на пошуковий запит з офіційними термінами/синонімами.
+// Допомагає подолати розрив у вокабулярі (напр. "бізнес зал" → "бізнес-лаунж аеропорт").
+async function rewriteQuery(question: string): Promise<string> {
+	try {
+		const r = await client.messages.create({
+			model: REWRITE_MODEL,
+			max_tokens: 80,
+			system:
+				"Перетвори питання клієнта банку на короткий пошуковий запит для бази знань. " +
+				"Додай офіційні банківські терміни та синоніми (напр. 'бізнес зал' → 'бізнес-лаунж аеропорт Visa Airport Companion'; " +
+				"'переваги' → 'умови переваги'). Поверни ТІЛЬКИ ключові слова через пробіл, без пояснень, українською.",
+			messages: [{ role: "user", content: question }],
+		})
+		const block = r.content[0]
+		return block?.type === "text" ? block.text.trim() : ""
+	} catch (e) {
+		console.error("[Rewrite] помилка, використовуємо оригінал:", e)
+		return ""
+	}
+}
 
 export interface Source {
 	url: string
@@ -67,13 +89,16 @@ export async function askClaude(
 	history: Turn[] = [],
 	prevUserQuestion = "",
 ): Promise<ClaudeResponse> {
-	// 1. Шукаємо в локальній базі.
-	// Для уточнюючих питань збагачуємо запит попереднім питанням —
-	// інакше короткий фоллоу-ап ("а чому не додав про X?") не знаходить контекст.
-	const retrievalQuery = prevUserQuestion
+	// 1. Шукаємо в локальній базі за кількома запитами:
+	//    - оригінал (можливо збагачений попереднім питанням для фоллоу-апів)
+	//    - переписаний Haiku (офіційні терміни/синоніми — долає розрив у вокабулярі)
+	const baseQuery = prevUserQuestion
 		? `${prevUserQuestion} ${userQuestion}`
 		: userQuestion
-	const ragResults = await retrieve(retrievalQuery)
+	const rewritten = await rewriteQuery(userQuestion)
+	if (rewritten) console.log(`[Rewrite] "${userQuestion}" → "${rewritten}"`)
+
+	const ragResults = await retrieveMulti([baseQuery, rewritten])
 	const hasRagResults = ragResults.length > 0
 
 	const ragContext = ragResults

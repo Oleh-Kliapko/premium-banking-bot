@@ -49,18 +49,24 @@ function articleId(url: string): string {
 }
 
 export async function retrieve(query: string): Promise<RetrievedChunk[]> {
+	return retrieveMulti([query])
+}
+
+// Пошук за кількома запитами одночасно (напр. оригінал + переписаний).
+// Кожен чанк оцінюється за НАЙКРАЩИМ збігом серед усіх запитів.
+export async function retrieveMulti(queries: string[]): Promise<RetrievedChunk[]> {
 	const chunks = loadIndex()
 	if (chunks.length === 0) return []
 
 	const threshold = Number(process.env.SIMILARITY_THRESHOLD) || 0.4
 	const topK = Number(process.env.TOP_K) || 4
 
-	const queryEmbedding = await embed(query)
+	const embeddings = await Promise.all(queries.filter(Boolean).map(q => embed(q)))
 
 	const scored = chunks
 		.map(chunk => ({
 			chunk,
-			score: cosineSimilarity(queryEmbedding, chunk.embedding),
+			score: Math.max(...embeddings.map(e => cosineSimilarity(e, chunk.embedding))),
 		}))
 		.filter(r => r.score >= threshold)
 		.sort((a, b) => b.score - a.score)
