@@ -2,9 +2,12 @@
 .env
 node_modules/
 dist/
+TODO.md
 
-# База знань (великий файл, генерується локально)
+# База знань (генерується локально)
 data/index.json
+data/pages-meta.json
+data/raw/
 
 # Системне
 .DS_Store
