@@ -62,27 +62,29 @@ export async function askClaude(userQuestion: string): Promise<ClaudeResponse> {
 		)
 		.join("\n\n---\n\n")
 
+	const topScore = ragResults[0]?.score ?? 0
 	console.log(
-		`[RAG] знайдено ${ragResults.length} чанків (поріг: ${process.env.SIMILARITY_THRESHOLD || 0.4})`,
+		`[RAG] знайдено ${ragResults.length} чанків, топ скор: ${topScore.toFixed(3)}`,
 	)
 
-	// 2. Веб-пошук тільки якщо RAG нічого не знайшов
-	const tools: Anthropic.Messages.ToolUnion[] = hasRagResults
-		? []
-		: [
+	// 2. Веб-пошук тільки коли база зовсім нічого не знайшла (передбачувані витрати)
+	const needsWebSearch = !hasRagResults
+	const tools: Anthropic.Messages.ToolUnion[] = needsWebSearch
+		? [
 				{
 					type: "web_search_20260209",
 					name: "web_search",
 					max_uses: 1,
 					allowed_domains: ALLOWED_DOMAINS,
 				} as Anthropic.Messages.WebSearchTool20260209,
-			]
+		  ]
+		: []
 
 	const response = await client.messages.create({
 		model: MODEL,
 		max_tokens: 1024,
 		system: buildSystemPrompt(ragContext),
-		tools,
+		...(tools.length > 0 ? { tools } : {}),
 		messages: [{ role: "user", content: userQuestion }],
 	})
 
