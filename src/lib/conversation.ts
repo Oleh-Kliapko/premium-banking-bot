@@ -10,9 +10,14 @@ const TTL_MS = 30 * 60 * 1000 // 30 хв неактивності → скида
 interface UserState {
 	turns: Turn[]
 	updatedAt: number
+	shown: Set<string> // ID статей, чиї джерела вже показували в цій темі
 }
 
 const store = new Map<number, UserState>()
+
+function newState(): UserState {
+	return { turns: [], updatedAt: Date.now(), shown: new Set() }
+}
 
 export function getHistory(userId: number): Turn[] {
 	const state = store.get(userId)
@@ -26,7 +31,7 @@ export function getHistory(userId: number): Turn[] {
 }
 
 export function addTurn(userId: number, role: Turn["role"], content: string) {
-	const state = store.get(userId) ?? { turns: [], updatedAt: Date.now() }
+	const state = store.get(userId) ?? newState()
 	state.turns.push({ role, content })
 	while (state.turns.length > MAX_TURNS) state.turns.shift()
 	state.updatedAt = Date.now()
@@ -35,6 +40,25 @@ export function addTurn(userId: number, role: Turn["role"], content: string) {
 
 export function clearHistory(userId: number) {
 	store.delete(userId)
+}
+
+// Джерела, які вже показували в межах поточної теми (щоб не дублювати).
+// Скидаються разом з історією (нова тема / TTL).
+export function getShownSources(userId: number): Set<string> {
+	const state = store.get(userId)
+	if (!state) return new Set()
+	if (Date.now() - state.updatedAt > TTL_MS) {
+		store.delete(userId)
+		return new Set()
+	}
+	return state.shown
+}
+
+export function recordShownSources(userId: number, ids: string[]) {
+	const state = store.get(userId) ?? newState()
+	for (const id of ids) state.shown.add(id)
+	state.updatedAt = Date.now()
+	store.set(userId, state)
 }
 
 // Питання, що чекає на вибір "нове/продовження"

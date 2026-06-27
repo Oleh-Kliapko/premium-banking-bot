@@ -4,6 +4,7 @@ import cron from "node-cron"
 import { spawn } from "child_process"
 import { authMiddleware } from "./middleware/auth"
 import { rateLimitMiddleware } from "./middleware/rateLimit"
+import { isAuthorized, initSessions } from "./lib/sessions"
 import { askClaude } from "./lib/claude"
 import { resetIndex } from "./lib/retriever"
 import {
@@ -13,7 +14,15 @@ import {
   lastUserQuestion,
   setPending,
   takePending,
+  getShownSources,
+  recordShownSources,
 } from "./lib/conversation"
+
+// ID статті з URL (останнє 8+-значне число) — ключ для дедуплікації джерел
+function articleIdFromUrl(url: string): string {
+  const nums = url.match(/\d{8,}/g)
+  return nums ? nums[nums.length - 1] : url
+}
 
 function escapeHtml(text: string): string {
   return text
@@ -45,6 +54,12 @@ bot.command("myid", ctx =>
 
 bot.command("start", ctx => {
   if (ctx.from) clearHistory(ctx.from.id)
+  // Неавторизований — просимо логін (доступ закритий)
+  if (!ctx.from || !isAuthorized(ctx.from.id)) {
+    return ctx.reply(
+      "🔒 Це приватний бот. Щоб отримати доступ, надішліть, будь ласка, ваш логін.",
+    )
+  }
   return ctx.reply(
     "👋 Вітаю! Я AI-консультант з продуктів банку.\n\n" +
       "Можу відповісти на питання про тарифи, картки, лаунжі та переваги преміум-пакетів.\n\n" +
@@ -92,15 +107,23 @@ async function handleQuestion(ctx: Context, userId: number, question: string, us
 
     addTurn(userId, "user", question)
     addTurn(userId, "assistant", result.text)
-    console.log(`[Bot] відповідь (${result.text.length} chars), джерел: ${result.sources.length}`)
+
+    // У межах однієї теми не дублюємо вже показані джерела — лишаємо лише нові
+    const shown = getShownSources(userId)
+    const newSources = result.sources
+      .filter(s => !shown.has(articleIdFromUrl(s.url)))
+      .slice(0, 3)
+    console.log(
+      `[Bot] відповідь (${result.text.length} chars), джерел: ${result.sources.length}, нових: ${newSources.length}`,
+    )
 
     let reply = escapeHtml(result.text)
-    if (result.sources.length > 0) {
-      const sourcesHtml = result.sources
-        .slice(0, 3)
+    if (newSources.length > 0) {
+      const sourcesHtml = newSources
         .map(s => `• <a href="${s.url}">${escapeHtml(s.title)}</a>`)
         .join("\n")
       reply += `\n\n📚 <b>Джерела:</b>\n${sourcesHtml}`
+      recordShownSources(userId, newSources.map(s => articleIdFromUrl(s.url)))
     }
 
     clearInterval(typingInterval)
@@ -180,5 +203,11 @@ cron.schedule("0 5 * * *", async () => {
   }
 }, { timezone: "Europe/Kyiv" })
 
-bot.start({ drop_pending_updates: true })
-console.log("Бот запущено (long polling)...")
+// Спершу завантажуємо авторизованих (Redis/файл), потім стартуємо.
+// .catch — щоб навіть при збої сховища бот піднявся (просто з перелогіном).
+initSessions()
+  .catch(e => console.error("[Sessions] init:", e))
+  .finally(() => {
+    bot.start({ drop_pending_updates: true })
+    console.log("Бот запущено (long polling)...")
+  })

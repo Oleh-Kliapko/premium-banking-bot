@@ -1,18 +1,24 @@
-import { MiddlewareFn } from 'grammy';
-import type { Context } from 'grammy';
+import type { Context } from "grammy"
+import { MiddlewareFn } from "grammy"
+import { isAuthorized, tryLogin } from "../lib/sessions"
 
-const allowedIds = new Set(
-  (process.env.ALLOWED_USER_IDS || '')
-    .split(',')
-    .map((id) => id.trim())
-    .filter(Boolean)
-    .map(Number)
-);
+export const authMiddleware: MiddlewareFn<Context> = async (ctx, next) => {
+	const userId = ctx.from?.id
+	if (!userId) return
 
-export const authMiddleware: MiddlewareFn<Context> = (ctx, next) => {
-  const userId = ctx.from?.id;
-  if (!userId || !allowedIds.has(userId)) {
-    return ctx.reply('🔒 Цей бот приватний. Доступ за запрошенням.');
-  }
-  return next();
-};
+	// Вже авторизований — пропускаємо далі
+	if (isAuthorized(userId)) return next()
+
+	// Інакше трактуємо повідомлення як спробу ввести логін
+	const text = ctx.message?.text
+	if (text && tryLogin(userId, text)) {
+		await ctx.reply(
+			"✅ Доступ надано! Тепер можете поставити своє запитання 👇",
+		)
+		return
+	}
+
+	await ctx.reply(
+		"🔒 Цей бот приватний. Введіть, будь ласка, логін для доступу.",
+	)
+}

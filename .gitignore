@@ -9,6 +9,9 @@ data/index.json
 data/pages-meta.json
 data/raw/
 
+# Авторизовані сесії (генерується в рантаймі)
+data/sessions.json
+
 # Системне
 .DS_Store
 .vscode/

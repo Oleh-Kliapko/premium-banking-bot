@@ -71,7 +71,9 @@ export async function retrieve(query: string): Promise<RetrievedChunk[]> {
 
 // Пошук за кількома запитами одночасно (напр. оригінал + переписаний).
 // Кожен чанк оцінюється за НАЙКРАЩИМ збігом серед усіх запитів.
-export async function retrieveMulti(queries: string[]): Promise<RetrievedChunk[]> {
+export async function retrieveMulti(
+	queries: string[],
+): Promise<RetrievedChunk[]> {
 	const chunks = loadIndex()
 	if (chunks.length === 0) return []
 
@@ -79,12 +81,16 @@ export async function retrieveMulti(queries: string[]): Promise<RetrievedChunk[]
 	const topK = Number(process.env.TOP_K) || 4
 	const perArticleCap = Number(process.env.CHUNKS_PER_ARTICLE) || 1
 
-	const embeddings = await Promise.all(queries.filter(Boolean).map(q => embed(q)))
+	const embeddings = await Promise.all(
+		queries.filter(Boolean).map(q => embed(q)),
+	)
 
 	const scored = chunks
 		.map(chunk => ({
 			chunk,
-			score: Math.max(...embeddings.map(e => cosineSimilarity(e, chunk.embedding))),
+			score: Math.max(
+				...embeddings.map(e => cosineSimilarity(e, chunk.embedding)),
+			),
 		}))
 		.filter(r => r.score >= threshold)
 		.sort((a, b) => b.score - a.score)

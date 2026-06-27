@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk"
 import { ALLOWED_DOMAINS } from "../config/domains"
-import { retrieveMulti } from "./retriever"
 import type { Turn } from "./conversation"
+import { retrieveMulti } from "./retriever"
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-4-6"
@@ -139,7 +139,7 @@ export async function askClaude(
 					max_uses: 1,
 					allowed_domains: ALLOWED_DOMAINS,
 				} as Anthropic.Messages.WebSearchTool20260209,
-		  ]
+			]
 		: []
 
 	// Поточний хід користувача: документи бази + саме питання
@@ -199,7 +199,11 @@ export async function askClaude(
 	// Якщо цитат не повернулось, але відповідь змістовна — лишаємо топ-1 чанк
 	// як fallback (щоб під відповіддю завжди було хоч одне джерело).
 	const citedIndices =
-		citedDocs.size > 0 ? [...citedDocs].sort((a, b) => a - b) : hasRagResults ? [0] : []
+		citedDocs.size > 0
+			? [...citedDocs].sort((a, b) => a - b)
+			: hasRagResults
+				? [0]
+				: []
 	for (const i of citedIndices) {
 		const chunk = ragResults[i]?.chunk
 		if (!chunk?.sourceUrl) continue
