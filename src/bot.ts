@@ -5,6 +5,7 @@ import { spawn } from "child_process"
 import { authMiddleware } from "./middleware/auth"
 import { rateLimitMiddleware } from "./middleware/rateLimit"
 import { isAuthorized, initSessions } from "./lib/sessions"
+import { ensureIndex, startHealthServer } from "./lib/bootstrap"
 import { askClaude } from "./lib/claude"
 import { resetIndex } from "./lib/retriever"
 import {
@@ -190,24 +191,44 @@ bot.catch(err => {
   console.error("Помилка бота:", err)
 })
 
-// Щодня о 5:00 — оновлюємо базу знань
-cron.schedule("0 5 * * *", async () => {
-  console.log("[Cron] Запуск щоденного оновлення бази...")
-  try {
-    await runScript("npm run scrape")
-    await runScript("npm run ingest")
-    resetIndex()
-    console.log("[Cron] Базу оновлено ✓")
-  } catch (err) {
-    console.error("[Cron] Помилка оновлення:", err)
-  }
-}, { timezone: "Europe/Kyiv" })
+// Щодня о 5:00 — оновлюємо базу знань.
+// На сервері (Render Free) вимикаємо через DISABLE_CRON=1: scrape+ingest надто
+// важкі для 512 МБ, а новий індекс там ефемерний. Оновлення робимо локально
+// (scrape+ingest → завантажити index.json у сховище), сервер його лише качає.
+if (process.env.DISABLE_CRON) {
+  console.log("[Cron] вимкнено (DISABLE_CRON)")
+} else {
+  cron.schedule("0 5 * * *", async () => {
+    console.log("[Cron] Запуск щоденного оновлення бази...")
+    try {
+      await runScript("npm run scrape")
+      await runScript("npm run ingest")
+      resetIndex()
+      console.log("[Cron] Базу оновлено ✓")
+    } catch (err) {
+      console.error("[Cron] Помилка оновлення:", err)
+    }
+  }, { timezone: "Europe/Kyiv" })
+}
 
-// Спершу завантажуємо авторизованих (Redis/файл), потім стартуємо.
-// .catch — щоб навіть при збої сховища бот піднявся (просто з перелогіном).
-initSessions()
-  .catch(e => console.error("[Sessions] init:", e))
-  .finally(() => {
-    bot.start({ drop_pending_updates: true })
-    console.log("Бот запущено (long polling)...")
-  })
+async function bootstrap() {
+  // 1. Біндимо PORT одразу — Render має побачити відкритий порт швидко
+  startHealthServer()
+  // 2. Підтягуємо індекс із зовнішнього сховища (якщо треба)
+  try {
+    await ensureIndex()
+  } catch (e) {
+    console.error("[Index] помилка завантаження:", e)
+  }
+  // 3. Завантажуємо авторизованих (Redis/файл)
+  try {
+    await initSessions()
+  } catch (e) {
+    console.error("[Sessions] init:", e)
+  }
+  // 4. Стартуємо полінг
+  bot.start({ drop_pending_updates: true })
+  console.log("Бот запущено (long polling)...")
+}
+
+bootstrap()
