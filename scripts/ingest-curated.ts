@@ -94,7 +94,7 @@ async function main() {
 	const kept = index.filter(c => !curatedUrls.has(c.sourceUrl))
 	const updated = [...newChunks, ...kept]
 
-	writeFileSync(INDEX_PATH, JSON.stringify(updated, null, 2))
+	writeFileSync(INDEX_PATH, JSON.stringify(updated))
 	console.log(
 		`\n✅ Оновлено: ${newChunks.length} curated-чанків, всього в індексі ${updated.length}`,
 	)

@@ -1,7 +1,11 @@
 import "dotenv/config"
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "fs"
 import { basename, join } from "path"
-import { embedPassage } from "../src/lib/embedder"
+import { embedPassages } from "../src/lib/embedder"
+
+// ФОП/ЮО (бізнес) статті преміум-менеджер не консультує — не індексуємо їх
+// взагалі (менший індекс і дешевший реіндекс). Retriever має ще й свій фільтр.
+const BUSINESS_TITLE_RE = /ФОП|ЮО|юридичн|підприємц/i
 
 interface Chunk {
 	id: string
@@ -80,29 +84,45 @@ async function main() {
 	console.log(
 		`📂 Файлів для індексації: ${files.length} (curated: ${curatedFiles.length}, raw: ${rawFiles.length})`,
 	)
-	const allChunks: Chunk[] = []
 
-	for (let f = 0; f < files.length; f++) {
-		const { dir, file } = files[f]
-		process.stdout.write(`\r[${f + 1}/${files.length}] ${file}`)
+	// 1. Збираємо всі чанки (без ембедингів), пропускаючи ФОП/ЮО
+	const pending: Omit<Chunk, "embedding">[] = []
+	let skipped = 0
+	for (const { dir, file } of files) {
 		const content = readFileSync(join(dir, file), "utf-8")
 		const { url, title, body } = parseMeta(content)
+		const isCurated = dir === CURATED_DIR
+		if (!isCurated && BUSINESS_TITLE_RE.test(title)) {
+			skipped++
+			continue
+		}
 		const parts = splitIntoChunks(cleanBody(body))
-
-		for (let i = 0; i < parts.length; i++) {
-			const text = parts[i].trim()
-			const embedding = await embedPassage(text)
-			allChunks.push({
+		parts.forEach((p, i) =>
+			pending.push({
 				id: `${basename(file, ".md")}-${i}`,
 				sourceUrl: url,
 				title: title || basename(file),
-				text,
-				embedding,
-			})
-		}
+				text: p.trim(),
+			}),
+		)
 	}
+	console.log(
+		`✂️  Чанків до ембедингу: ${pending.length} (пропущено ФОП/ЮО статей: ${skipped})`,
+	)
 
-	writeFileSync(INDEX_PATH, JSON.stringify(allChunks, null, 2))
+	// 2. Ембединг батчами через Voyage
+	const embeddings = await embedPassages(
+		pending.map(p => p.text),
+		(done, total) => process.stdout.write(`\r🧮 Ембединг: ${done}/${total}`),
+	)
+
+	// 3. Зшиваємо метадані + вектори
+	const allChunks: Chunk[] = pending.map((p, i) => ({
+		...p,
+		embedding: embeddings[i],
+	}))
+
+	writeFileSync(INDEX_PATH, JSON.stringify(allChunks))
 	console.log(`\n\n✅ Збережено ${allChunks.length} чанків → data/index.json`)
 }
 
