@@ -1,38 +1,47 @@
 # 🏦 Premium Banking Bot
 
-Закритий Telegram-бот — **AI-консультант по продуктах банку** (тарифи, картки, лаунжі, переваги преміум-пакетів). Прототип/демо для портфоліо.
+Закритий Telegram-бот — **AI-консультант по продуктах банку** (тарифи, картки, лаунжі, переваги преміум-пакетів). Робочий прототип/демо для портфоліо, **задеплоєний 24/7 на безкоштовному хостингу**.
 
-> ⚠️ Демонстраційний прототип. Не є офіційним сервісом банку. Бренд Sense використано лише для внутрішнього демо.
+> ⚠️ Демонстраційний прототип. Не є офіційним сервісом банку. Бренд Sense використано лише для демо.
 
 ---
 
 ## 🎯 Що вміє
 
-- Відповідає на питання про продукти банку українською мовою
-- Шукає відповіді у локальній базі знань (`help.sensebank.com.ua`) через RAG
-- Якщо в базі немає — використовує веб-пошук по **білому списку офіційних доменів** (Visa, Mastercard, DragonPass, НБУ тощо)
-- Цитує джерела під кожною відповіддю (клікабельні посилання)
+- Відповідає українською на питання про продукти банку
+- Шукає відповіді у локальній базі знань (`help.sensebank.com.ua`) через **RAG**
+- Якщо в базі немає — **веб-пошук по білому списку офіційних доменів** (Visa, Mastercard, DragonPass, НБУ) як fallback
+- Цитує **лише ті джерела, які реально використав** (нативні citations Claude) — клікабельні посилання
 - Не вигадує цифр/тарифів — чесно каже «перевірте в застосунку», якщо інформації немає
-- Закритий доступ — відповідає лише користувачам з allowlist
+- Памʼятає контекст діалогу; у межах теми **не дублює вже показані джерела**
+- Закритий доступ за **логіном-перепусткою** (самостійне підключення без участі адміна)
 
 ---
 
 ## 🏗️ Архітектура
 
 ```
-Повідомлення → [allowlist?] → ні → «бот приватний» (Claude не викликається)
-                   │ так
+Повідомлення → [авторизований?] → ні → запит логіну (ALLOWED_LOGINS)
+                   │ так                     │ вірний → запам'ятати (Redis)
                    ▼
-   [ембединг питання] → [пошук у базі Sense] → топ-K чанків (поріг 0.55)
-                   │
-                   ├─ є збіг → Claude відповідає з бази (~$0.01)
-                   └─ нема збігу → Claude + web_search по офіційних доменах (~$0.15)
+   [rate limit] → [rewrite питання (Haiku)] → [ембединг (Voyage API)]
                    │
                    ▼
-        відповідь + джерела → Telegram
+   [пошук у базі Sense] → топ-K чанків (cosine, поріг 0.45, ФОП/ЮО відсіяні)
+                   │
+                   ├─ є збіг → Claude (Sonnet) відповідає з бази + citations
+                   └─ нема   → Claude + web_search по офіційних доменах (fallback)
+                   │
+                   ▼
+        відповідь + тільки процитовані джерела → Telegram
 ```
 
-**Чому RAG, а не лише веб-пошук:** локальна база коштує ~$0.01 за запит проти ~$0.15 за веб-пошук з динамічною фільтрацією. Веб-пошук — лише fallback.
+> Детальна схема процесу, зовнішні сервіси та інструкції ручного оновлення — у [SCHEMA.md](SCHEMA.md).
+
+**Ключові рішення:**
+- **Ембединги через хмарний API (Voyage), а не локальну модель** — локальна `transformers.js` їла ~1.6 ГБ RAM і не влазила у безкоштовний хостинг (512 МБ). Voyage прибирає модель з процесу.
+- **RAG замість завжди-веб-пошуку** — локальна база ~$0.01/запит проти ~$0.15 за веб-пошук з динамічною фільтрацією. Веб-пошук — лише fallback.
+- **Нативні citations** — у джерела потрапляє тільки те, що Claude реально цитував (а не весь топ-K).
 
 ---
 
@@ -42,12 +51,13 @@
 |---|---|
 | Runtime | Node.js + TypeScript |
 | Telegram | [grammY](https://grammy.dev) |
-| LLM | Claude API (`claude-sonnet-4-6`) через `@anthropic-ai/sdk` |
-| Ембединги | `intfloat/multilingual-e5-small` через `@huggingface/transformers` (локально) |
-| Векторне сховище | JSON-файл + cosine similarity в пам'яті |
-| Веб-пошук | Вбудований `web_search` Claude API з `allowed_domains` |
+| LLM | Claude API (`claude-sonnet-4-6`) + Haiku для rewrite, через `@anthropic-ai/sdk` |
+| Ембединги | **[Voyage AI](https://voyageai.com)** `voyage-3.5-lite` (512 вимірів), мультимовні |
+| Векторне сховище | JSON-файл (88 МБ) + cosine similarity в пам'яті |
+| Памʼять входу | **[Upstash Redis](https://upstash.com)** (або локальний файл) |
+| Веб-пошук | Вбудований `web_search` Claude API з `allowed_domains` (fallback) |
 | Скрапер | `cheerio` + sitemap parsing + HEAD-check |
-| Планувальник | `node-cron` (щодня о 5:00 Kyiv) |
+| Хостинг | **[Render](https://render.com)** Free + keep-alive пінгер |
 
 ---
 
@@ -56,38 +66,40 @@
 ```
 premium-banking-bot/
 ├── data/
+│   ├── curated/             # ручні документи (контакти тощо) — у git
 │   ├── raw/                 # скраплені сторінки (.md) — gitignore
-│   ├── index.json           # векторний індекс — gitignore
-│   └── pages-meta.json      # метадані для HEAD-check — gitignore
+│   └── index.json           # векторний індекс 88 МБ — gitignore (GitHub Release)
 ├── scripts/
 │   ├── scrape.ts            # sitemap → HEAD-check → scrape змінених сторінок
-│   └── ingest.ts            # raw → чанки → ембединги → index.json
+│   ├── ingest.ts            # raw+curated → чанки → Voyage ембединги → index.json
+│   └── ingest-curated.ts    # швидка реіндексація лише curated-документів
 └── src/
-    ├── bot.ts               # grammY: команди, обробники, cron
+    ├── bot.ts               # grammY: команди, кнопки, cron, bootstrap
     ├── config/
     │   └── domains.ts       # ALLOWED_DOMAINS для веб-пошуку
     ├── middleware/
-    │   ├── auth.ts          # allowlist по ALLOWED_USER_IDS
+    │   ├── auth.ts          # гейт за логіном (ALLOWED_LOGINS)
     │   └── rateLimit.ts     # per-user rate limit + ліміт довжини
     └── lib/
-        ├── embedder.ts      # локальні мультимовні ембединги
-        ├── retriever.ts     # cosine similarity + поріг
-        └── claude.ts        # RAG + web_search fallback → відповідь + джерела
+        ├── embedder.ts      # ембединги через Voyage API
+        ├── retriever.ts     # cosine + поріг + ФОП/ЮО фільтр + дедуп статей
+        ├── claude.ts        # RAG + citations + web_search fallback + rewrite
+        ├── conversation.ts  # памʼять діалогу + дедуп показаних джерел
+        ├── sessions.ts      # доступ за логіном + персистентність Redis/файл
+        └── bootstrap.ts     # health-сервер (keep-alive) + завантаження індексу
 ```
 
 ---
 
 ## ⚙️ Налаштування
 
-### 1. Створити бота в Telegram
+### 1. Telegram-бот
+[@BotFather](https://t.me/BotFather) → `/newbot` → токен. `/setprivacy` → Enable, `/setjoingroups` → Disable.
 
-1. [@BotFather](https://t.me/BotFather) → `/newbot` → отримати токен
-2. `/setprivacy` → Enable, `/setjoingroups` → Disable
-
-### 2. Отримати Anthropic API ключ
-
-[console.anthropic.com](https://console.anthropic.com) → API Keys → Create Key.
-Постав ліміт витрат у Console (напр. $5).
+### 2. Ключі
+- **Anthropic:** [console.anthropic.com](https://console.anthropic.com) → API Keys. Постав ліміт витрат (напр. $5).
+- **Voyage:** [dashboard.voyageai.com](https://dashboard.voyageai.com) → API Keys (free-тариф покриває з запасом).
+- **Redis (для деплою):** [console.upstash.com](https://console.upstash.com) → Create Database → скопіюй `rediss://...` URL.
 
 ### 3. Конфігурація
 
@@ -95,75 +107,83 @@ premium-banking-bot/
 cp .env.example .env
 ```
 
-`.env`:
 ```
 TELEGRAM_BOT_TOKEN=         # від @BotFather
-ALLOWED_USER_IDS=           # числові Telegram ID через кому: 123,456
-ANTHROPIC_API_KEY=          # з console.anthropic.com
+ALLOWED_LOGINS=             # логіни-перепустки через кому: guest2026,demo-sense
+ANTHROPIC_API_KEY=          # console.anthropic.com
+VOYAGE_API_KEY=             # dashboard.voyageai.com
 CLAUDE_MODEL=claude-sonnet-4-6
-SIMILARITY_THRESHOLD=0.55   # поріг релевантності RAG
-TOP_K=4                     # скільки чанків брати
+SIMILARITY_THRESHOLD=0.45   # поріг релевантності RAG (під Voyage)
+TOP_K=14                    # скільки чанків (різних статей) подавати Claude
+CHUNKS_PER_ARTICLE=1        # макс. чанків з однієї статті
 WEB_SEARCH_MAX_USES=3
-MAX_INPUT_CHARS=1000        # ліміт довжини питання
-```
+MAX_INPUT_CHARS=1000
 
-> Свій Telegram ID можна дізнатись командою `/myid` у боті.
+# опційно (для сервера):
+REDIS_URL=                  # Upstash; без нього — локальний файл sessions.json
+INDEX_URL=                  # URL index.json у GitHub Release; качається на старті
+DISABLE_CRON=               # на сервері = 1 (вимикає важкий scrape+ingest)
+```
 
 ---
 
-## 🚀 Запуск
+## 🚀 Запуск (локально)
 
 ```bash
 npm install
 
-# 1. Зібрати базу знань (перший раз ~10-20 хв, ~1600 сторінок)
-npm run scrape      # скрапить help.sensebank.com.ua
-npm run ingest      # будує векторний індекс
+# 1. Зібрати базу знань (перший раз ~10-20 хв)
+npm run scrape      # скрапить help.sensebank.com.ua у data/raw/
+npm run ingest      # будує index.json через Voyage (~88 МБ)
 
 # 2. Запустити бота
 npm run dev         # long polling
 ```
 
-База оновлюється автоматично **щодня о 5:00** (Kyiv) поки бот працює. Можна оновити вручну: `npm run scrape && npm run ingest`.
+> Як оновлювати базу, заливати індекс і деплоїти — покроково в [SCHEMA.md](SCHEMA.md).
 
 ---
 
-## 🤖 Команди бота
+## 🌐 Деплой (Render Free, 24/7, $0)
+
+Коротко (повна інструкція — у [SCHEMA.md](SCHEMA.md)):
+
+1. `index.json` лежить як asset **GitHub Release** (репо публічне) → бот качає на старті через `INDEX_URL`.
+2. Render **Web Service** (Free): Build `npm install && npm run build`, Start `npm start`.
+3. Env: усі ключі + `REDIS_URL`, `INDEX_URL`, `DISABLE_CRON=1`.
+4. Keep-alive: [cron-job.org](https://cron-job.org) пінгує `GET /` кожні 10 хв (щоб Free-інстанс не засинав).
+
+---
+
+## 🤖 Команди
 
 | Команда | Опис |
 |---|---|
-| `/start` | Привітання + дисклеймер |
-| `/help` | Що вміє бот + приклади питань |
-| `/myid` | Повертає твій Telegram ID (для allowlist) |
-| текст | Питання → RAG + (за потреби) веб-пошук |
+| `/start` | Привітання / запит логіну, якщо не авторизований |
+| `/help` | Що вміє бот + приклади |
+| `/reset` | Очистити контекст розмови |
+| текст | Логін (якщо не авторизований) або питання |
 
 ---
 
 ## 🛡️ Анти-галюцинаційні правила
 
 1. Відповідає лише з бази банку або дозволених офіційних доменів
-2. «Не знаю» — правильна відповідь, якщо інформації немає
-3. Не називає цифр/тарифів, яких немає в джерелах
-4. **Загальне ≠ персональне:** «Visa Signature дає лаунж» — загальне правило, тому додає «перевірте умови вашої картки в застосунку»
-5. Завжди вказує джерело під відповіддю
-6. Поріг релевантності 0.55 — відсіює слабко пов'язані чанки
+2. «Не знаю» — правильна відповідь, якщо інформації немає (без нерелевантних джерел)
+3. Не називає цифр/тарифів поза джерелами
+4. **Загальне ≠ персональне:** «Visa Signature дає лаунж» — загальне правило → додає «перевірте умови вашої картки в застосунку»
+5. Джерела — лише ті, що Claude **реально процитував** (нативні citations)
+6. Поріг релевантності 0.45; ФОП/ЮО статті виключені (преміум-менеджер ними не консультує)
 
 ---
 
 ## 💰 Контроль витрат
 
-- Жорсткий cap у [Anthropic Console](https://console.anthropic.com)
-- RAG (~$0.01) замість завжди-веб-пошуку (~$0.15)
-- `max_uses: 1` на веб-пошук
-- Не-allowlist користувач → нуль витрат (Claude не викликається)
-- Per-user rate limit (10 запитів/хв) + ліміт довжини питання
-
----
-
-## 🌐 Білий список доменів
-
-Веб-пошук обмежений офіційними джерелами (`src/config/domains.ts`):
-платіжні системи (Visa, Mastercard), лаунж-програми (DragonPass, LoungeKey, Priority Pass), регулятор (НБУ), офіційні сайти аеропортів. Жодних агрегаторів, форумів чи блогів.
+- Жорсткий cap у [Anthropic Console](https://console.anthropic.com) (основна вартість ≈ $0.01/відповідь)
+- Voyage — копійки: реіндекс ≈ $0.06 разово, запит ≈ частки цента (free-тариф покриває)
+- RAG (~$0.01) замість веб-пошуку (~$0.15); `max_uses: 1`
+- Неавторизований користувач → **нуль витрат** (Claude не викликається)
+- Per-user rate limit (10/хв) + ліміт довжини питання
 
 ---
 
