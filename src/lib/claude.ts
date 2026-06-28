@@ -111,7 +111,11 @@ export async function askClaude(
 	const rewritten = await rewriteQuery(baseQuery)
 	if (rewritten) console.log(`[Rewrite] "${baseQuery}" → "${rewritten}"`)
 
-	const ragResults = await retrieveMulti([baseQuery, rewritten])
+	// Запити пошуку: контекстний (тема) + переписаний + ГОЛЕ поточне питання.
+	// Голе питання ловить специфічний намір поточного ходу (напр. «розмір
+	// компенсації»), який інакше розчиняється в накопиченому контексті теми.
+	const queries = [...new Set([baseQuery, rewritten, userQuestion].filter(Boolean))]
+	const ragResults = await retrieveMulti(queries)
 	const hasRagResults = ragResults.length > 0
 
 	// Кожен знайдений чанк передаємо як окремий document-блок з увімкненими

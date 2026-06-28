@@ -85,9 +85,13 @@ async function main() {
 		`📂 Файлів для індексації: ${files.length} (curated: ${curatedFiles.length}, raw: ${rawFiles.length})`,
 	)
 
-	// 1. Збираємо всі чанки (без ембедингів), пропускаючи ФОП/ЮО
+	// 1. Збираємо всі чанки (без ембедингів), пропускаючи ФОП/ЮО та ДУБЛІКАТИ.
+	// Сайт скрапиться під кількома URL → той самий текст повторюється ~3 рази;
+	// без дедупу дублікати зʼїдають слоти пошуку й витісняють реальний контент.
 	const pending: Omit<Chunk, "embedding">[] = []
+	const seenTexts = new Set<string>()
 	let skipped = 0
+	let dups = 0
 	for (const { dir, file } of files) {
 		const content = readFileSync(join(dir, file), "utf-8")
 		const { url, title, body } = parseMeta(content)
@@ -97,17 +101,23 @@ async function main() {
 			continue
 		}
 		const parts = splitIntoChunks(cleanBody(body))
-		parts.forEach((p, i) =>
+		parts.forEach((p, i) => {
+			const text = p.trim()
+			if (seenTexts.has(text)) {
+				dups++
+				return
+			}
+			seenTexts.add(text)
 			pending.push({
 				id: `${basename(file, ".md")}-${i}`,
 				sourceUrl: url,
 				title: title || basename(file),
-				text: p.trim(),
-			}),
-		)
+				text,
+			})
+		})
 	}
 	console.log(
-		`✂️  Чанків до ембедингу: ${pending.length} (пропущено ФОП/ЮО статей: ${skipped})`,
+		`✂️  Чанків до ембедингу: ${pending.length} (ФОП/ЮО статей: ${skipped}, дублікатів прибрано: ${dups})`,
 	)
 
 	// 2. Ембединг батчами через Voyage
