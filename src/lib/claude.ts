@@ -129,16 +129,18 @@ export async function askClaude(
 		`[RAG] знайдено ${ragResults.length} чанків, топ скор: ${topScore.toFixed(3)}`,
 	)
 
-	// 2. Веб-пошук тільки коли база зовсім нічого не знайшла (передбачувані витрати)
+	// 2. Веб-пошук тільки коли база зовсім нічого не знайшла (передбачувані витрати).
+	// Базова версія web_search_20250305 — працює на ВСІХ моделях (зокрема Haiku 4.5);
+	// динамічна 20260209 потребує 4.6+. allowed_domains підтримується в обох.
 	const needsWebSearch = !hasRagResults
 	const tools: Anthropic.Messages.ToolUnion[] = needsWebSearch
 		? [
 				{
-					type: "web_search_20260209",
+					type: "web_search_20250305",
 					name: "web_search",
 					max_uses: 1,
 					allowed_domains: ALLOWED_DOMAINS,
-				} as Anthropic.Messages.WebSearchTool20260209,
+				} as Anthropic.Messages.WebSearchTool20250305,
 			]
 		: []
 
