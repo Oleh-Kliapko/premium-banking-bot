@@ -92,15 +92,21 @@ export async function askClaude(
 	history: Turn[] = [],
 	prevUserQuestion = "",
 ): Promise<ClaudeResponse> {
-	// 1. Шукаємо в локальній базі за кількома запитами:
-	//    - оригінал (можливо збагачений попереднім питанням для фоллоу-апів)
-	//    - переписаний Haiku (офіційні терміни/синоніми — долає розрив у вокабулярі)
-	const baseQuery = prevUserQuestion
-		? `${prevUserQuestion} ${userQuestion}`
-		: userQuestion
-	// Переписуємо ПОВНИЙ контекстний запит (попереднє + поточне), а не голий
-	// фоллоу-ап — інакше уточнення на кшталт «я мав на увазі з кредитного ліміту»
-	// втрачає тему («ОВДП») і тягне нерелевантні статті.
+	// 1. Шукаємо в локальній базі за кількома запитами.
+	// Запит будуємо з ВІКНА теми — кількох останніх питань користувача, а не
+	// лише попереднього. Інакше після 2 розпливчастих фоллоу-апів губиться тема
+	// (напр. «ОВДП»), RAG порожніє і спрацьовує дорогий web_search.
+	const recentUserQs = history
+		.filter(t => t.role === "user")
+		.map(t => t.content)
+		.slice(-2)
+	const topicQs = recentUserQs.length
+		? recentUserQs
+		: prevUserQuestion
+			? [prevUserQuestion]
+			: []
+	const baseQuery = [...topicQs, userQuestion].join(" ").trim()
+	// Переписуємо контекстний запит Haiku (офіційні терміни/синоніми)
 	const rewritten = await rewriteQuery(baseQuery)
 	if (rewritten) console.log(`[Rewrite] "${baseQuery}" → "${rewritten}"`)
 
@@ -129,16 +135,18 @@ export async function askClaude(
 		`[RAG] знайдено ${ragResults.length} чанків, топ скор: ${topScore.toFixed(3)}`,
 	)
 
-	// 2. Веб-пошук тільки коли база зовсім нічого не знайшла (передбачувані витрати).
-	// Базова версія web_search_20250305 — працює на ВСІХ моделях (зокрема Haiku 4.5);
-	// динамічна 20260209 потребує 4.6+. allowed_domains підтримується в обох.
-	const needsWebSearch = !hasRagResults
+	// 2. Веб-пошук — лише коли база зовсім нічого не знайшла. Дорогий (один пошук
+	// додає ~15-20К вхідних токенів), тож вимикабельний: WEB_SEARCH_MAX_USES=0
+	// повністю прибирає fallback (RAG-порожньо → чесне «не знаю»).
+	// Базова web_search_20250305 працює на ВСІХ моделях (зокрема Haiku 4.5).
+	const webMaxUses = Number(process.env.WEB_SEARCH_MAX_USES ?? 1)
+	const needsWebSearch = !hasRagResults && webMaxUses > 0
 	const tools: Anthropic.Messages.ToolUnion[] = needsWebSearch
 		? [
 				{
 					type: "web_search_20250305",
 					name: "web_search",
-					max_uses: 1,
+					max_uses: webMaxUses,
 					allowed_domains: ALLOWED_DOMAINS,
 				} as Anthropic.Messages.WebSearchTool20250305,
 			]
