@@ -234,7 +234,7 @@ export async function askClaude(
 	const usage = response.usage as any
 	const webReqs = usage?.server_tool_use?.web_search_requests ?? 0
 	console.log(
-		`[Claude] in=${usage.input_tokens} out=${usage.output_tokens} | rag=${ragResults.length} web=${webReqs} | sources=${finalSources.length}`,
+		`[Claude] model=${MODEL} in=${usage.input_tokens} out=${usage.output_tokens} | rag=${ragResults.length} web=${webReqs} | sources=${finalSources.length}`,
 	)
 
 	return {
