@@ -93,8 +93,10 @@ export function isAuthorized(userId: number): boolean {
 // Спроба входу: якщо текст збігається з одним із дозволених логінів —
 // авторизуємо акаунт (у пам'яті) і фоново персистимо.
 export function tryLogin(userId: number, text: string): boolean {
-	const login = text.trim()
-	if (!login || !allowedLogins().includes(login)) return false
+	// Регістр не враховуємо: "Oklyapko" == "oklyapko" == "OKLYAPKO"
+	const login = text.trim().toLowerCase()
+	if (!login || !allowedLogins().some(l => l.toLowerCase() === login))
+		return false
 	authorized.add(userId)
 	// Не блокуємо відповідь користувачу — пишемо у фоні
 	backend.add(userId).catch(e => console.error("[Sessions] persist:", e))
