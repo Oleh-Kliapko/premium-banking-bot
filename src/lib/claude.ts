@@ -49,6 +49,13 @@ function extractArticleId(url: string): string {
 	return nums ? nums[nums.length - 1] : url
 }
 
+// Склеюємо весь текст відповіді (щоб перевірити, чи база сказала «не знайшов»)
+function concatText(content: Anthropic.Messages.ContentBlock[]): string {
+	let t = ""
+	for (const b of content) if (b.type === "text") t += b.text
+	return t
+}
+
 // Чи відповідь — це "не знайшов" / м'яка відмова (тоді джерела показувати немає сенсу)
 function isNotFoundAnswer(text: string): boolean {
 	const lower = text.toLowerCase()
@@ -114,7 +121,9 @@ export async function askClaude(
 	// Запити пошуку: контекстний (тема) + переписаний + ГОЛЕ поточне питання.
 	// Голе питання ловить специфічний намір поточного ходу (напр. «розмір
 	// компенсації»), який інакше розчиняється в накопиченому контексті теми.
-	const queries = [...new Set([baseQuery, rewritten, userQuestion].filter(Boolean))]
+	const queries = [
+		...new Set([baseQuery, rewritten, userQuestion].filter(Boolean)),
+	]
 	const ragResults = await retrieveMulti(queries)
 	const hasRagResults = ragResults.length > 0
 
@@ -145,35 +154,79 @@ export async function askClaude(
 	// повністю прибирає fallback (RAG-порожньо → чесне «не знаю»).
 	// Базова web_search_20250305 працює на ВСІХ моделях (зокрема Haiku 4.5).
 	const webMaxUses = Number(process.env.WEB_SEARCH_MAX_USES ?? 1)
-	const needsWebSearch = !hasRagResults && webMaxUses > 0
-	const tools: Anthropic.Messages.ToolUnion[] = needsWebSearch
-		? [
+	let totalIn = 0
+	let totalOut = 0
+
+	// ---- Прохід 1: база (лише якщо взагалі є чанки) ----
+	let response: Anthropic.Messages.Message | undefined
+	let fromWeb = false
+	if (hasRagResults) {
+		response = await client.messages.create({
+			model: MODEL,
+			max_tokens: 1024,
+			system: buildSystemPrompt(true),
+			messages: [
+				...history.map(t => ({ role: t.role, content: t.content })),
+				{
+					role: "user",
+					content: [...docBlocks, { type: "text", text: userQuestion }],
+				},
+			],
+		})
+		totalIn += response.usage.input_tokens
+		totalOut += response.usage.output_tokens
+		console.log(
+			`[Claude] прохід=база model=${MODEL} in=${response.usage.input_tokens} out=${response.usage.output_tokens} | rag=${ragResults.length}`,
+		)
+	}
+
+	// База не дала відповіді: або чанків не було, або Claude явно сказав
+	// «не знайшов у документах» → пробуємо веб (якщо ввімкнено).
+	const baseText = response ? concatText(response.content) : ""
+	const baseFailed = !hasRagResults || isNotFoundAnswer(baseText)
+
+	// ---- Прохід 2: веб-пошук по офіційних доменах (без марних чанків бази) ----
+	if (baseFailed && webMaxUses > 0) {
+		const webResponse = await client.messages.create({
+			model: MODEL,
+			max_tokens: 1024,
+			system: buildSystemPrompt(false),
+			tools: [
 				{
 					type: "web_search_20250305",
 					name: "web_search",
 					max_uses: webMaxUses,
 					allowed_domains: ALLOWED_DOMAINS,
 				} as Anthropic.Messages.WebSearchTool20250305,
-			]
-		: []
+			],
+			messages: [
+				...history.map(t => ({ role: t.role, content: t.content })),
+				{ role: "user", content: userQuestion },
+			],
+		})
+		totalIn += webResponse.usage.input_tokens
+		totalOut += webResponse.usage.output_tokens
+		const webReqs =
+			(webResponse.usage as any)?.server_tool_use?.web_search_requests ?? 0
+		console.log(
+			`[Claude] прохід=веб model=${MODEL} in=${webResponse.usage.input_tokens} out=${webResponse.usage.output_tokens} | web=${webReqs}`,
+		)
+		response = webResponse
+		fromWeb = true
+	}
 
-	// Поточний хід користувача: документи бази + саме питання
-	const userContent: Anthropic.Messages.ContentBlockParam[] = hasRagResults
-		? [...docBlocks, { type: "text", text: userQuestion }]
-		: [{ type: "text", text: userQuestion }]
+	// Ні база, ні веб не дали відповіді (RAG порожній + веб вимкнено) → «не знаю»
+	if (!response) {
+		return {
+			text: "Не маю підтвердженої інформації. Перевірте, будь ласка, в офіційному застосунку банку.",
+			sources: [],
+			usedWebSearch: false,
+			inputTokens: totalIn,
+			outputTokens: totalOut,
+		}
+	}
 
-	const response = await client.messages.create({
-		model: MODEL,
-		max_tokens: 1024,
-		system: buildSystemPrompt(hasRagResults),
-		...(tools.length > 0 ? { tools } : {}),
-		messages: [
-			...history.map(t => ({ role: t.role, content: t.content })),
-			{ role: "user", content: userContent },
-		],
-	})
-
-	// 3. Парсимо відповідь
+	// 3. Парсимо фінальну відповідь
 	const seenIds = new Set<string>()
 	const sources: Source[] = []
 	const citedDocs = new Set<number>() // індекси процитованих document-блоків
@@ -210,11 +263,12 @@ export async function askClaude(
 		}
 	}
 
-	// RAG-джерела: беремо ЛИШЕ ті статті, що Claude процитував (дедуп за article ID).
-	// Якщо цитат не повернулось, але відповідь змістовна — лишаємо топ-1 чанк
-	// як fallback (щоб під відповіддю завжди було хоч одне джерело).
-	const citedIndices =
-		citedDocs.size > 0
+	// RAG-джерела — ЛИШЕ якщо відповідь із БАЗИ (не з вебу): беремо ті статті,
+	// що Claude процитував (дедуп за article ID). Немає цитат, але відповідь
+	// змістовна → лишаємо топ-1 чанк як fallback (щоб було хоч одне джерело).
+	const citedIndices = fromWeb
+		? []
+		: citedDocs.size > 0
 			? [...citedDocs].sort((a, b) => a - b)
 			: hasRagResults
 				? [0]
@@ -236,17 +290,15 @@ export async function askClaude(
 	// Якщо бот не знайшов відповіді — не показуємо нерелевантні джерела
 	const finalSources = isNotFoundAnswer(finalText) ? [] : sources
 
-	const usage = response.usage as any
-	const webReqs = usage?.server_tool_use?.web_search_requests ?? 0
 	console.log(
-		`[Claude] model=${MODEL} in=${usage.input_tokens} out=${usage.output_tokens} | rag=${ragResults.length} web=${webReqs} | sources=${finalSources.length}`,
+		`[Claude] разом in=${totalIn} out=${totalOut} | джерело=${fromWeb ? "веб" : "база"} | sources=${finalSources.length}`,
 	)
 
 	return {
 		text: finalText,
 		sources: finalSources,
 		usedWebSearch,
-		inputTokens: usage.input_tokens,
-		outputTokens: usage.output_tokens,
+		inputTokens: totalIn,
+		outputTokens: totalOut,
 	}
 }
