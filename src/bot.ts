@@ -211,6 +211,32 @@ if (process.env.DISABLE_CRON) {
   }, { timezone: "Europe/Kyiv" })
 }
 
+// Старт полінгу з м'яким ретраєм на 409 Conflict. Під час zero-downtime деплою
+// Render тримає старий інстанс живим, поки новий стартує, — обидва на мить
+// смикають getUpdates, і Telegram віддає 409. Замість падіння новий інстанс
+// чекає й повторює, поки старий не звільнить полінг.
+async function startPolling(maxAttempts = 12, delayMs = 5000): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await bot.start({
+        drop_pending_updates: true,
+        onStart: () => console.log("Бот запущено (long polling)..."),
+      })
+      return // штатна зупинка через bot.stop()
+    } catch (err) {
+      const code = (err as { error_code?: number })?.error_code
+      if (code === 409 && attempt < maxAttempts) {
+        console.warn(
+          `[Polling] 409 Conflict (інший інстанс ще живий) — спроба ${attempt}/${maxAttempts}, чекаю ${delayMs / 1000}с...`,
+        )
+        await new Promise(r => setTimeout(r, delayMs))
+        continue
+      }
+      throw err // не 409 або вичерпано спроби — хай впаде, щоб помітити
+    }
+  }
+}
+
 async function bootstrap() {
   // 1. Біндимо PORT одразу — Render має побачити відкритий порт швидко
   startHealthServer()
@@ -226,9 +252,8 @@ async function bootstrap() {
   } catch (e) {
     console.error("[Sessions] init:", e)
   }
-  // 4. Стартуємо полінг
-  bot.start({ drop_pending_updates: true })
-  console.log("Бот запущено (long polling)...")
+  // 4. Стартуємо полінг (з ретраєм на 409 під час перекриття деплоїв)
+  await startPolling()
 }
 
 bootstrap()
